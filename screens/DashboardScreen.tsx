@@ -12,6 +12,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, fontSize, fontWeight, borderRadius, shadows } from '../styles/colors';
 import { useAuth } from '../contexts/AuthContext';
 import locationService, { MechanicStatus, LocationData } from '../services/locationService';
+import requestService, { ServiceRequest } from '../services/requestService';
+import RequestNotificationScreen from './RequestNotificationScreen';
+import ActiveJobScreen from './ActiveJobScreen';
+import FloatingMessageBox from '../components/FloatingMessageBox';
 
 interface DashboardScreenProps {
   onNavigateToHistory: () => void;
@@ -35,6 +39,10 @@ export default function DashboardScreen({
   const [location, setLocation] = useState<LocationData | null>(null);
   const [locationPermission, setLocationPermission] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [incomingRequests, setIncomingRequests] = useState<ServiceRequest[]>([]);
+  const [acceptedRequests, setAcceptedRequests] = useState<ServiceRequest[]>([]);
+  const [activeRequest, setActiveRequest] = useState<ServiceRequest | null>(null);
+  const [showRequestNotification, setShowRequestNotification] = useState(false);
   const pulseAnim = React.useRef(new Animated.Value(1)).current;
 
   // Initialize location and status
@@ -64,12 +72,12 @@ export default function DashboardScreen({
           Animated.timing(pulseAnim, {
             toValue: 1.1,
             duration: 1000,
-            useNativeDriver: true,
+            useNativeDriver: false,
           }),
           Animated.timing(pulseAnim, {
             toValue: 1,
             duration: 1000,
-            useNativeDriver: true,
+            useNativeDriver: false,
           }),
         ])
       );
@@ -77,6 +85,53 @@ export default function DashboardScreen({
       return () => pulse.stop();
     }
   }, [isOnline]);
+
+  // Listen to incoming requests
+  useEffect(() => {
+    if (user?.uid) {
+      console.log('🔄 Starting to listen for requests for mechanic:', user.uid, 'online status:', isOnline);
+      
+      const unsubscribe = requestService.listenToRequests(user.uid, (requests) => {
+        console.log('📨 Received requests:', requests.length, requests);
+        setIncomingRequests(requests);
+        
+        // Show notification for new requests (only if online)
+        if (requests.length > 0 && !showRequestNotification && isOnline) {
+          console.log('🔔 Showing request notification for:', requests[0]);
+          setShowRequestNotification(true);
+        }
+      });
+
+      return () => {
+        console.log('🛑 Stopping request listener');
+        unsubscribe();
+      };
+    } else {
+      console.log('❌ Not listening for requests - user:', !!user?.uid);
+    }
+  }, [user?.uid, isOnline, showRequestNotification]);
+
+  // Listen to accepted requests (active jobs)
+  useEffect(() => {
+    if (user?.uid) {
+      console.log('🔄 Starting to listen for accepted requests for mechanic:', user.uid);
+      
+      const unsubscribe = requestService.listenToAcceptedRequests(user.uid, (requests) => {
+        console.log('📋 Received accepted requests:', requests.length, requests);
+        
+        // If there's an accepted request and no active request, set it as active
+        if (requests.length > 0 && !activeRequest) {
+          console.log('🔧 Setting active job:', requests[0]);
+          setActiveRequest(requests[0]);
+        }
+      });
+
+      return () => {
+        console.log('🛑 Stopping accepted requests listener');
+        unsubscribe();
+      };
+    }
+  }, [user?.uid, activeRequest]);
 
   const initializeLocationAndStatus = async () => {
     try {
@@ -150,6 +205,108 @@ export default function DashboardScreen({
       ]
     );
   };
+
+  // Request handling functions
+  const handleAcceptRequest = async () => {
+    if (incomingRequests.length > 0) {
+      const request = incomingRequests[0];
+      console.log('✅ Accepting request:', request.id);
+      
+      // Update the request status to accepted
+      const success = await requestService.acceptRequest(request.id, user?.uid || '');
+      
+      if (success) {
+        console.log('✅ Request accepted successfully');
+        
+        // Go offline when accepting a request
+        if (user?.uid) {
+          try {
+            await locationService.updateOnlineStatus(user.uid, false);
+            setIsOnline(false);
+            onOnlineStatusChange?.(false);
+            console.log('🔄 Mechanic went offline after accepting request');
+          } catch (error) {
+            console.error('❌ Error going offline:', error);
+          }
+        }
+        
+        setActiveRequest(request);
+        setShowRequestNotification(false);
+        setIncomingRequests([]);
+      } else {
+        console.log('❌ Failed to accept request');
+        Alert.alert('Error', 'Failed to accept request. Please try again.');
+      }
+    }
+  };
+
+  const handleDeclineRequest = async () => {
+    if (incomingRequests.length > 0) {
+      const request = incomingRequests[0];
+      console.log('❌ Declining request:', request.id);
+      
+      // Update the request status to declined
+      const success = await requestService.declineRequest(request.id, user?.uid || '');
+      
+      if (success) {
+        console.log('✅ Request declined successfully');
+        setShowRequestNotification(false);
+        setIncomingRequests([]);
+      } else {
+        console.log('❌ Failed to decline request');
+        Alert.alert('Error', 'Failed to decline request. Please try again.');
+      }
+    }
+  };
+
+  const handleCloseRequestNotification = () => {
+    setShowRequestNotification(false);
+  };
+
+  const handleCompleteJob = async () => {
+    if (activeRequest && user?.uid) {
+      try {
+        // Complete the request
+        const success = await requestService.completeRequest(activeRequest.id, user.uid);
+        
+        if (success) {
+          console.log('✅ Job completed successfully');
+          
+          // Go back online when job is completed
+          try {
+            await locationService.updateOnlineStatus(user.uid, true);
+            setIsOnline(true);
+            onOnlineStatusChange?.(true);
+            console.log('🔄 Mechanic went back online after completing job');
+          } catch (error) {
+            console.error('❌ Error going online:', error);
+          }
+        } else {
+          console.log('❌ Failed to complete job');
+          Alert.alert('Error', 'Failed to complete job. Please try again.');
+          return;
+        }
+      } catch (error) {
+        console.error('❌ Error completing job:', error);
+        Alert.alert('Error', 'Failed to complete job. Please try again.');
+        return;
+      }
+    }
+    
+    setActiveRequest(null);
+  };
+
+  // Show active job screen if there's an active request
+  if (activeRequest) {
+    return (
+      <ActiveJobScreen
+        request={activeRequest}
+        onComplete={handleCompleteJob}
+        onNavigateToDashboard={() => setActiveRequest(null)}
+        onOpenMessaging={() => {}} // This is no longer used
+      />
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -257,6 +414,18 @@ export default function DashboardScreen({
           )}
         </View>
       </View>
+
+
+
+      {/* Request Notification Screen */}
+      {showRequestNotification && incomingRequests.length > 0 && (
+        <RequestNotificationScreen
+          request={incomingRequests[0]}
+          onAccept={handleAcceptRequest}
+          onDecline={handleDeclineRequest}
+          onClose={handleCloseRequestNotification}
+        />
+      )}
 
 
     </View>
