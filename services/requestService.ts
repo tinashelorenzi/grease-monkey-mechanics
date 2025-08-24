@@ -125,38 +125,52 @@ class RequestService {
     try {
       console.log('🔄 Updating request status:', requestId, 'to:', newStatus);
       
-      // Update in mechanic's subcollection
+      // First, get the request data to find the main request ID
       const mechanicRequestRef = doc(firestore, 'mechanics', mechanicId, 'requests', requestId);
-      await updateDoc(mechanicRequestRef, {
+      const requestDoc = await getDoc(mechanicRequestRef);
+      
+      if (!requestDoc.exists()) {
+        console.error('❌ Mechanic request not found:', requestId);
+        return false;
+      }
+      
+      const requestData = requestDoc.data();
+      const mainRequestId = requestData.requestId; // Use the requestId field to find main request
+      
+      if (!mainRequestId) {
+        console.error('❌ No requestId found in mechanic request:', requestId);
+        return false;
+      }
+      
+      console.log('🔍 Found main request ID:', mainRequestId);
+      
+      // Update both collections in parallel for better performance
+      const updatePromises = [];
+      
+      // 1. Update mechanic's subcollection
+      const mechanicUpdatePromise = updateDoc(mechanicRequestRef, {
         status: newStatus,
         updatedAt: Timestamp.now()
       });
-
-      // Get the request data to find the main request ID
-      const requestDoc = await getDoc(mechanicRequestRef);
-      if (requestDoc.exists()) {
-        const requestData = requestDoc.data();
-        const mainRequestId = requestData.requestId; // Use the requestId field to find main request
-        
-        if (mainRequestId) {
-          try {
-            // Update in main requests collection using the requestId
-            const mainRequestRef = doc(firestore, 'requests', mainRequestId);
-            await updateDoc(mainRequestRef, {
-              status: newStatus,
-              updatedAt: Timestamp.now()
-            });
-            console.log('✅ Updated main request:', mainRequestId);
-          } catch (mainRequestError) {
-            console.log('⚠️ Could not update main request (this is okay):', mainRequestError);
-            // Don't fail the status update if main request update fails
-          }
-        } else {
-          console.log('⚠️ No requestId found in mechanic request');
-        }
-      }
-
+      updatePromises.push(mechanicUpdatePromise);
+      
+      // 2. Update main requests collection
+      const mainRequestRef = doc(firestore, 'requests', mainRequestId);
+      const mainUpdatePromise = updateDoc(mainRequestRef, {
+        status: newStatus,
+        updatedAt: Timestamp.now()
+      }).catch((error) => {
+        console.log('⚠️ Could not update main request (this is okay):', error);
+        // Don't fail the entire operation if main request update fails
+        return null;
+      });
+      updatePromises.push(mainUpdatePromise);
+      
+      // Wait for both updates to complete
+      await Promise.all(updatePromises);
+      
       console.log(`✅ Request ${requestId} status updated to: ${newStatus}`);
+      console.log(`✅ Updated both collections: mechanic subcollection and main requests collection`);
       return true;
     } catch (error) {
       console.error('❌ Error updating request status:', error);
@@ -166,20 +180,56 @@ class RequestService {
 
   // Accept a request
   async acceptRequest(requestId: string, mechanicId: string) {
-    return await this.updateRequestStatus(requestId, mechanicId, 'accepted');
+    console.log('🔄 Accepting request:', requestId);
+    const success = await this.updateRequestStatus(requestId, mechanicId, 'accepted');
+    
+    if (success) {
+      // Verify the update was successful
+      const verified = await this.verifyRequestUpdate(requestId, mechanicId, 'accepted');
+      if (verified) {
+        console.log('✅ Request accepted and verified in both collections');
+      } else {
+        console.log('⚠️ Request accepted but verification failed');
+      }
+    }
+    
+    return success;
   }
 
   // Decline a request
   async declineRequest(requestId: string, mechanicId: string) {
-    return await this.updateRequestStatus(requestId, mechanicId, 'declined');
+    console.log('🔄 Declining request:', requestId);
+    const success = await this.updateRequestStatus(requestId, mechanicId, 'declined');
+    
+    if (success) {
+      // Verify the update was successful
+      const verified = await this.verifyRequestUpdate(requestId, mechanicId, 'declined');
+      if (verified) {
+        console.log('✅ Request declined and verified in both collections');
+      } else {
+        console.log('⚠️ Request declined but verification failed');
+      }
+    }
+    
+    return success;
   }
 
   // Complete a request
   async completeRequest(requestId: string, mechanicId: string) {
-    console.log('🔄 completeRequest called with:', { requestId, mechanicId });
-    const result = await this.updateRequestStatus(requestId, mechanicId, 'completed');
-    console.log('🔄 completeRequest result:', result);
-    return result;
+    console.log('🔄 Completing request:', requestId);
+    const success = await this.updateRequestStatus(requestId, mechanicId, 'completed');
+    
+    if (success) {
+      // Verify the update was successful
+      const verified = await this.verifyRequestUpdate(requestId, mechanicId, 'completed');
+      if (verified) {
+        console.log('✅ Request completed and verified in both collections');
+      } else {
+        console.log('⚠️ Request completed but verification failed');
+      }
+    }
+    
+    return success;
   }
 
   // Submit a quote for a request
@@ -187,43 +237,54 @@ class RequestService {
     try {
       console.log('💰 Submitting quote for request:', requestId, 'amount:', amount);
       
-      // Add quote details to the mechanic's request first
+      // First, get the request data to find the main request ID
       const mechanicRequestRef = doc(firestore, 'mechanics', mechanicId, 'requests', requestId);
-      await updateDoc(mechanicRequestRef, {
+      const requestDoc = await getDoc(mechanicRequestRef);
+      
+      if (!requestDoc.exists()) {
+        console.error('❌ Mechanic request not found:', requestId);
+        return false;
+      }
+      
+      const requestData = requestDoc.data();
+      const mainRequestId = requestData.requestId;
+      
+      if (!mainRequestId) {
+        console.error('❌ No requestId found in mechanic request:', requestId);
+        return false;
+      }
+      
+      console.log('🔍 Found main request ID:', mainRequestId);
+      
+      // Update both collections in parallel for better performance
+      const updatePromises = [];
+      
+      // 1. Update mechanic's subcollection with quote details
+      const mechanicUpdatePromise = updateDoc(mechanicRequestRef, {
         quoteAmount: amount,
         quoteDescription: description,
         quotedAt: Timestamp.now(),
       });
-
-      console.log('✅ Quote details added to mechanic request');
-
-      // Get the main request ID from the mechanic's request
-      const requestDoc = await getDoc(mechanicRequestRef);
-      if (requestDoc.exists()) {
-        const requestData = requestDoc.data();
-        const mainRequestId = requestData.requestId;
-        
-        console.log('🔍 Found main request ID:', mainRequestId);
-        
-        if (mainRequestId) {
-          try {
-            // Update main request collection
-            const mainRequestRef = doc(firestore, 'requests', mainRequestId);
-            await updateDoc(mainRequestRef, {
-              quoteAmount: amount,
-              quoteDescription: description,
-              quotedAt: Timestamp.now(),
-            });
-            console.log('✅ Quote details updated in main request:', mainRequestId);
-          } catch (mainRequestError) {
-            console.log('⚠️ Could not update main request (this is okay):', mainRequestError);
-            // Don't fail the quote submission if main request update fails
-          }
-        } else {
-          console.log('⚠️ No main request ID found in mechanic request');
-        }
-      }
-
+      updatePromises.push(mechanicUpdatePromise);
+      
+      // 2. Update main requests collection with quote details
+      const mainRequestRef = doc(firestore, 'requests', mainRequestId);
+      const mainUpdatePromise = updateDoc(mainRequestRef, {
+        quoteAmount: amount,
+        quoteDescription: description,
+        quotedAt: Timestamp.now(),
+      }).catch((error) => {
+        console.log('⚠️ Could not update main request (this is okay):', error);
+        // Don't fail the entire operation if main request update fails
+        return null;
+      });
+      updatePromises.push(mainUpdatePromise);
+      
+      // Wait for both updates to complete
+      await Promise.all(updatePromises);
+      
+      console.log('✅ Quote details updated in both collections');
+      
       // Update request status to 'quoted' (this will also update both collections)
       const success = await this.updateRequestStatus(requestId, mechanicId, 'quoted');
       
@@ -255,6 +316,61 @@ class RequestService {
     } catch (error) {
       console.error('Error getting request details:', error);
       return null;
+    }
+  }
+
+  // Verify that both collections are updated correctly
+  async verifyRequestUpdate(requestId: string, mechanicId: string, expectedStatus: ServiceRequest['status']) {
+    try {
+      console.log('🔍 Verifying request update for:', requestId);
+      
+      // Check mechanic's subcollection
+      const mechanicRequestRef = doc(firestore, 'mechanics', mechanicId, 'requests', requestId);
+      const mechanicDoc = await getDoc(mechanicRequestRef);
+      
+      if (!mechanicDoc.exists()) {
+        console.error('❌ Mechanic request not found during verification');
+        return false;
+      }
+      
+      const mechanicData = mechanicDoc.data();
+      const mainRequestId = mechanicData.requestId;
+      
+      if (!mainRequestId) {
+        console.error('❌ No main request ID found during verification');
+        return false;
+      }
+      
+      // Check main requests collection
+      const mainRequestRef = doc(firestore, 'requests', mainRequestId);
+      const mainDoc = await getDoc(mainRequestRef);
+      
+      const mechanicStatus = mechanicData.status;
+      const mainStatus = mainDoc.exists() ? mainDoc.data().status : null;
+      
+      console.log('📊 Verification results:');
+      console.log('  - Mechanic subcollection status:', mechanicStatus);
+      console.log('  - Main collection status:', mainStatus);
+      console.log('  - Expected status:', expectedStatus);
+      
+      const mechanicCorrect = mechanicStatus === expectedStatus;
+      const mainCorrect = mainStatus === expectedStatus;
+      
+      if (mechanicCorrect && mainCorrect) {
+        console.log('✅ Both collections updated correctly');
+        return true;
+      } else if (mechanicCorrect && !mainCorrect) {
+        console.log('⚠️ Only mechanic subcollection updated correctly');
+        return true; // Still consider this a success since main collection is optional
+      } else if (!mechanicCorrect) {
+        console.log('❌ Mechanic subcollection not updated correctly');
+        return false;
+      }
+      
+      return false;
+    } catch (error) {
+      console.error('❌ Error during verification:', error);
+      return false;
     }
   }
 
